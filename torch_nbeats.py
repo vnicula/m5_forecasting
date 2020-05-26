@@ -296,8 +296,8 @@ def main():
     # added cuda:0 parameter 
     device = torch.device('cuda:0')  # use the trainer.py to run on GPU.
 
-    forecast_length = 5
-    backcast_length = 3 * forecast_length
+    forecast_length = 28
+    backcast_length = 6 * forecast_length
     batch_size = 10  # greater than 4 for viz
 
     # milk = pd.read_csv('data/milk.csv', index_col=0, parse_dates=True)
