@@ -262,18 +262,21 @@ def save(model, optimiser, grad_step):
 def eval_test(backcast_length, forecast_length, net, norm_constant, test_losses, x_test, y_test):
     net.eval()
     _, forecast = net(torch.tensor(x_test, dtype=torch.float))
+    forecast = torch.clamp(forecast, 0.0, 1.0)
     test_losses.append(F.mse_loss(forecast, torch.tensor(y_test, dtype=torch.float)).item())
     ## added .cpu here so that the data gets moved to CPU first and then gets converted to numpy array
     p = forecast.cpu().detach().numpy()
     subplots = [221, 222, 223, 224]
     plt.figure(1)
     for plot_id, i in enumerate(np.random.choice(range(len(x_test)), size=4, replace=False)):
+        rmse = np.sqrt(((p[i] * norm_constant - y_test[i] * norm_constant) ** 2).mean())
         ff, xx, yy = p[i] * norm_constant, x_test[i] * norm_constant, y_test[i] * norm_constant
         plt.subplot(subplots[plot_id])
         plt.grid()
         plot_scatter(range(0, backcast_length), xx, color='b')
         plot_scatter(range(backcast_length, backcast_length + forecast_length), yy, color='g')
         plot_scatter(range(backcast_length, backcast_length + forecast_length), ff, color='r')
+        plt.title('RMSE: %f' % rmse, fontdict={'fontsize': 8, 'fontweight': 'medium'})
     plt.show()
 
 
@@ -297,8 +300,8 @@ def main():
     device = torch.device('cuda:0')  # use the trainer.py to run on GPU.
 
     forecast_length = 28
-    backcast_length = 6 * forecast_length
-    batch_size = 10  # greater than 4 for viz
+    backcast_length = 3 * forecast_length
+    batch_size = 16  # greater than 4 for viz
 
     # milk = pd.read_csv('data/milk.csv', index_col=0, parse_dates=True)
     # fake_data = fake_multivariate_data()
@@ -320,8 +323,8 @@ def main():
         x_train_batch.append(milk[i - backcast_length:i])
         y.append(milk[i:i + forecast_length])
 
-    x_train_batch = np.array(x_train_batch)[..., 0]
-    y = np.array(y)[..., 0]
+    x_train_batch = np.array(x_train_batch)[..., 1]
+    y = np.array(y)[..., 1]
 
     c = int(len(x_train_batch) * 0.8)
     x_train, y_train = x_train_batch[:c], y[:c]
@@ -345,7 +348,7 @@ def main():
     # training
     # model seems to converge well around ~2500 grad steps and starts to overfit a bit after.
     test_losses = []
-    for i in range(2):
+    for i in range(10):
         eval_test(backcast_length, forecast_length, net, norm_constant, test_losses, x_test, y_test)
         train_100_grad_steps(data, device, net, optimiser, test_losses)
 

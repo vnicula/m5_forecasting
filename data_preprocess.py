@@ -79,7 +79,7 @@ def plot_item(store_sales_df, dates_list, item_index):
     TS_selected = y 
     y = pd.DataFrame(y).set_index([dates_list])
     y.index = pd.to_datetime(y.index)
-    ax = y.plot(figsize=(30, 9),color='black')
+    ax = y.plot(figsize=(20, 10),color='black')
     ax.set_facecolor('lightgrey')
     plt.xticks(fontsize=21 )
     plt.yticks(fontsize=21 )
