@@ -1,8 +1,10 @@
 import datetime as dt
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
+import random
+import tensorflow.keras as tfk
 
 INPUT_DIR_PATH = 'm5-forecasting-accuracy/'
 
@@ -73,6 +75,33 @@ def get_data_for_store_dept(sales_df, dates_list, store_id, dept_id):
     return DF_Sales
 
 
+def get_data_for_store(sales_df, dates_list, store_id):
+
+    store_sales_df = sales_df[sales_df['store_id'] == store_id]
+    store_sales_df['item_store_id'] = store_sales_df.apply(lambda x: x['item_id']+'_'+x['store_id'], axis=1)
+    DF_Sales = store_sales_df.loc[:,'d_1':'d_1913'].T
+    DF_Sales.columns = store_sales_df['item_store_id'].values
+
+    #Set Dates as index 
+    DF_Sales = pd.DataFrame(DF_Sales).set_index([dates_list])
+    DF_Sales.index = pd.to_datetime(DF_Sales.index)
+
+    return DF_Sales
+
+
+def get_all_data(sales_df, dates_list):
+
+    sales_df['item_store_id'] = sales_df.apply(lambda x: x['item_id']+'_'+x['store_id'], axis=1)
+    DF_Sales = sales_df.loc[:,'d_1':'d_1913'].T
+    DF_Sales.columns = sales_df['item_store_id'].values
+
+    #Set Dates as index 
+    DF_Sales = pd.DataFrame(DF_Sales).set_index([dates_list])
+    DF_Sales.index = pd.to_datetime(DF_Sales.index)
+
+    return DF_Sales
+
+
 def plot_item(store_sales_df, dates_list, item_index):
     #Select arbitrary index and plot the time series
     y = pd.DataFrame(store_sales_df.iloc[:,item_index])
@@ -88,3 +117,63 @@ def plot_item(store_sales_df, dates_list, item_index):
     plt.ylabel(ylabel = 'Sales Demand',fontsize = 21)
     plt.xlabel(xlabel = 'Date',fontsize = 21)
     plt.show()
+
+
+class SeriesDataGenerator(tfk.utils.Sequence):
+    'Generates data for training'
+    
+    def __init__(self, samples_df, backcast_len, forecast_len, batch_size, normalizer, shuffle):
+        'Initialization'
+        self.samples_df = samples_df
+        self.backcast_len = backcast_len
+        self.forecast_len = forecast_len
+        self.normalizer = normalizer
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.data = samples_df.values.astype(float)
+        self.compute_indexes()
+        self.on_epoch_end()
+        print('Len time_indexes: %d, series_indexes: %d, batches_per_timepoint: %d' %
+            (len(self.time_indexes), len(self.series_indexes), self.batches_per_timepoint)
+        )
+
+    def compute_indexes(self):
+        self.time_indexes = list(range(len(self.data) - self.forecast_len - self.backcast_len + 1))
+        self.series_indexes = list(range(self.data.shape[1]))
+        self.batches_per_timepoint = int(math.ceil(len(self.series_indexes) / self.batch_size))
+
+    def __len__(self):
+        'Batches per epoch'
+        return len(self.time_indexes) * self.batches_per_timepoint
+
+    def __getitem__(self, index):
+        'Generate one batch'
+        # Generate indexes of the batch
+        time_index = self.time_indexes[index // self.batches_per_timepoint]
+        series_index = index % self.batches_per_timepoint
+        series_indexes = self.series_indexes[series_index*self.batch_size:(series_index+1)*self.batch_size]
+
+        # Generate data
+        X_batch, y_batch = self.__data_generation(time_index, series_indexes)
+
+        return X_batch, y_batch
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            random.shuffle(self.time_indexes)
+            random.shuffle(self.series_indexes)
+
+    def __data_generation(self, time_index, series_indexes):
+        'Generates data containing batch_size samples'
+        X, y = [], []
+        time_index_b = time_index + self.backcast_len
+        time_index_bf = time_index_b + self.forecast_len
+        for series_index in series_indexes:
+            X.append(np.expand_dims(
+                self.data[time_index:time_index_b, series_index] / self.normalizer[series_index], axis=1)
+            )
+            y.append(np.expand_dims(
+                self.data[time_index_b:time_index_bf, series_index] / self.normalizer[series_index], axis=1)
+            )
+
+        return np.array(X), np.array(y)
