@@ -3,6 +3,7 @@ from argparse import ArgumentParser
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import random
 import tensorflow as tf
 
@@ -131,23 +132,63 @@ def get_m5_dataset(backcast_length, forecast_length, batch_size, is_training):
     print(data_df.head())
     # data_preprocess.plot_item(data_df, dates_list, 1)
 
-    data = data_df.fillna(0).values.astype(float)
-    norm_constant = np.max(data[:28-forecast_length-backcast_length], axis=0)
-    print('Norm constant 0?:', np.where(norm_constant == 0)[0])
-    norm_constant = np.maximum(1e-8, norm_constant)
-    print('Norm constant: ', norm_constant)
+    # data = data_df.fillna(0).values.astype(float)
+    data = data_df.values.astype(float)
+
+    # data = data[:, :1000]
+
+    norm_constant = np.max(data[:-3*forecast_length-backcast_length], axis=0)
+    print('Norm constant 0?' , np.where(norm_constant == 0)[0])
+    norm_constant[norm_constant == 0] = 1.0
+    print('Norm constant shape %s and vals:' % norm_constant.shape, norm_constant)
+    print('Norm constant max %f, min %f' % (max(norm_constant), min(norm_constant)))
     if is_training:
         m5_datagen = data_preprocess.SeriesDataGenerator(
             data_df.iloc[:-3*forecast_length-backcast_length],
+            # data_df.iloc[:-3*forecast_length-backcast_length, :1000],
             backcast_length, forecast_length, batch_size, norm_constant, is_training
         )
     else:
         m5_datagen = data_preprocess.SeriesDataGenerator(
-            data_df.iloc[-4*forecast_length-backcast_length:], 
+            data_df.iloc[-4*forecast_length-backcast_length:],
+            # data_df.iloc[-4*forecast_length-backcast_length:, :1000], 
             backcast_length, forecast_length, batch_size, norm_constant, is_training
         )
 
     return m5_datagen, norm_constant
+
+
+def get_m5_dataset_predict(backcast_length, forecast_length, batch_size):
+    
+    sell_prices_df, calendar_df, sales_train_validation_df, submission_df = data_preprocess.read_data()
+    dates_list = data_preprocess.get_dates_list(calendar_df)
+    # data_df = data_preprocess.get_data_for_store_dept(sales_train_validation_df, dates_list, 'CA_1', 'HOBBIES_1')
+    # data_df = data_preprocess.get_data_for_store(sales_train_validation_df, dates_list, 'CA_1')
+    data_df = data_preprocess.get_all_data(sales_train_validation_df, dates_list)
+
+    print(data_df.head())
+    # data_preprocess.plot_item(data_df, dates_list, 1)
+
+    # data = data_df.fillna(0).values.astype(float)
+    data = data_df.values.astype(float)
+
+    # data = data[:, :100]
+
+    norm_constant = np.max(data, axis=0)
+    print('Norm constant 0?' , np.where(norm_constant == 0)[0])
+    norm_constant[norm_constant == 0] = 1.0
+    print('Norm constant shape %s and vals:' % norm_constant.shape, norm_constant)
+    print('Norm constant max %f, min %f' % (max(norm_constant), min(norm_constant)))
+
+    # m5_datagen = data_preprocess.SeriesDataGenerator(
+    #     data_df.iloc[-forecast_length:],
+    #     # data_df.iloc[-4*forecast_length-backcast_length:, :1000], 
+    #     backcast_length, forecast_length, batch_size, norm_constant, False
+    # )
+    norm_data = (data[-backcast_length:] / norm_constant).T
+    m5_data = np.expand_dims(norm_data, axis=-1)
+
+    return m5_data, norm_constant
 
 
 def train_model(model: NBeatsNet, task: str, best_perf=np.inf, max_steps=10001, plot_results=500, is_test=False):
@@ -240,7 +281,39 @@ def train_model(model: NBeatsNet, task: str, best_perf=np.inf, max_steps=10001, 
     print('final test smape=%f, rmse=%f' % (smape, rmse))
 
 
-def callbacks_list(logdir):
+class PredictionLogger(tf.keras.callbacks.Callback):
+        def __init__(self, val_data, logsdir, model):
+            super(PredictionLogger, self).__init__()
+            self.logsdir = logsdir  # where the event files will be written 
+            self.validation_data = val_data # validation data generator
+            self.nbeats = model
+            # self.writer = tf.summary.FileWriter(self.logsdir)  # creating the summary writer
+
+        # def on_train_begin(self, logs=None):  # when the training begins (run only once)
+        #         image_summary = [] # creating a list of summaries needed (can be scalar, images, histograms etc)
+        #         for index in range(len(self.model.output)):  # self.model is accessible within callback
+        #             img_sum = tf.summary.image('img{}'.format(index), self.attention_matplotlib(self.model.output[index]))                    
+        #             image_summary.append(img_sum)
+        #         self.total_summary = tf.summary.merge(image_summary)
+
+        def on_epoch_end(self, epoch, logs = None):   # at the end of each epoch run this
+            logs = logs or {} 
+            x, y = self.validation_data.__getitem__(0)  # get data from the generator
+            # print('y', y)
+            validation_predictions = self.model.predict(x)
+            # NOTE cannot clip to 0 because of smape denominator
+            # nbeats_krs_train.py:24: RuntimeWarning: invalid value encountered in true_divide
+            clip_validation_predictions = np.maximum(1e-8, validation_predictions)
+            
+            smape, rmse = get_metrics(y, clip_validation_predictions, 1)
+            print('batch 0 test smape=%f, rmse=%f' % (smape, rmse))
+
+            for k in range(5):
+                plot_keras_model_predictions(self.nbeats, True, epoch, x[k, :, 0], y[k, :, 0],
+                                             clip_validation_predictions[k, :, 0], axis=k)
+            return
+
+def callbacks_list(logdir, eval_data, model):
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -251,10 +324,11 @@ def callbacks_list(logdir):
             # save_format='tf',
             save_weights_only=True,
             verbose=1),
+        PredictionLogger(eval_data, logdir, model),
         tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',  # watch out for reg losses
             min_delta=1e-3,
-            patience=10,
+            patience=5,
             mode='min',
             restore_best_weights=True,
             verbose=1),
@@ -269,27 +343,49 @@ def callbacks_list(logdir):
 
 def fit_model(model: NBeatsNet, task: str, best_perf=np.inf, max_steps=10001, plot_results=500, is_test=False):
     ensure_results_dir()
-    # if is_test then override max_steps argument
-    if is_test:
-        max_steps = 5
 
     if task == 'm5':
         m5_data_test, _ = get_m5_dataset(
-            model.backcast_length, model.forecast_length, batch_size=512, is_training=False)
+            model.backcast_length, model.forecast_length, batch_size=4096, is_training=False)
         m5_data_train, norm_constant = get_m5_dataset(
-            model.backcast_length, model.forecast_length, batch_size=512, is_training=True)
+            model.backcast_length, model.forecast_length, batch_size=4096, is_training=True)
     else:
         raise ValueError('Invalid task.')
 
     model.fit(
         m5_data_train, 
         validation_data=m5_data_test, 
-        epochs=100, 
-        callbacks=callbacks_list('fit_results')
+        epochs=50, 
+        callbacks=callbacks_list('fit_results', m5_data_test, model)
     )
 
-    model.save('fit_results/n_beats_model.h5')
+    model.save('fit_results/n_beats_model.tf')
 
+
+def predict_model(model: NBeatsNet, task: str):
+
+    if task == 'm5':
+        m5_data_predict, norm_constant = get_m5_dataset_predict(
+            model.backcast_length, model.forecast_length, batch_size=4096)
+    else:
+        raise ValueError('Invalid task.')
+
+    model.load('fit_results/n_beats_model.tf')
+    results = model.predict(m5_data_predict)
+    results = np.maximum(0, results)
+    print('Results before const norm shape: ', results.shape)
+    print('Norm const shape: ', norm_constant.shape)
+    for i in range(len(results)):
+        results[i] = results[i] * norm_constant[i]
+    print('Results shape: ', results.shape)
+
+    sub_df = pd.read_csv('m5-forecasting-accuracy/sample_submission.csv')
+    print('Sub df shape: ', sub_df.values.shape)
+    for i in range(len(results)):
+        for j in range(1, 29):
+            sub_df.iloc[i, j] = results[i, j-1, 0]
+    
+    sub_df.to_csv('my_submission.csv', index=False)
 
 
 def plot_keras_model_predictions(model, is_test, step, backcast, forecast, prediction, axis):
@@ -301,6 +397,7 @@ def plot_keras_model_predictions(model, is_test, step, backcast, forecast, predi
     plt.figure()
     plt.grid(True)
     x_y = np.concatenate([backcast, forecast], axis=-1).flatten()
+    # print('MODEL:', model)
     plt.plot(list(range(model.backcast_length)), backcast.flatten(), color='b')
     plt.plot(list(range(len(x_y) - model.forecast_length, len(x_y))), forecast.flatten(), color='g')
     plt.plot(list(range(len(x_y) - model.forecast_length, len(x_y))), prediction.flatten(), color='r')
@@ -319,17 +416,27 @@ def main():
     print('Number of devices: {}'.format(mirrored_strategy.num_replicas_in_sync))
     with mirrored_strategy.scope():
         if args.task in ['m5', 'dummy']:
-            # model = NBeatsNet(backcast_length=120, forecast_length=28, input_dim=416,
-            #                   stack_types=(NBeatsNet.GENERIC_BLOCK, NBeatsNet.GENERIC_BLOCK), nb_blocks_per_stack=2,
-            #                   thetas_dim=(4, 4), share_weights_in_stack=True, hidden_layer_units=256)
-            model = NBeatsNet(
-                # input_dim=416,
-                input_dim=1,
-                backcast_length=12*28, forecast_length=28,
-                stack_types=(NBeatsNet.TREND_BLOCK, NBeatsNet.SEASONALITY_BLOCK), nb_blocks_per_stack=3,
-                thetas_dim=(4, 8), share_weights_in_stack=False,
-                hidden_layer_units=256
-            )
+            model = NBeatsNet(backcast_length=2*28, forecast_length=28, input_dim=1,
+                              stack_types=(NBeatsNet.GENERIC_BLOCK, NBeatsNet.GENERIC_BLOCK), nb_blocks_per_stack=2,
+                              thetas_dim=(4, 4), share_weights_in_stack=True, hidden_layer_units=256)
+            # model = NBeatsNet(
+            #     # input_dim=416,
+            #     input_dim=1,
+            #     backcast_length=6*28, forecast_length=28,
+            #     stack_types=(NBeatsNet.TREND_BLOCK, NBeatsNet.SEASONALITY_BLOCK), nb_blocks_per_stack=2,
+            #     thetas_dim=(4, 8), share_weights_in_stack=False,
+            #     hidden_layer_units=128
+            # )
+            # model = NBeatsNet(input_dim=1, 
+            #     backcast_length=3*28,
+            #     forecast_length=28,
+            #     stack_types=(NBeatsNet.TREND_BLOCK, NBeatsNet.SEASONALITY_BLOCK),
+            #     nb_blocks_per_stack=2,
+            #     thetas_dim=(4, 8),
+            #     share_weights_in_stack=False,
+            #     hidden_layer_units=256,
+            #     nb_harmonics=10
+            # )
         # elif args.task == 'kcg':
         #     model = NBeatsNet(input_dim=2, backcast_length=360, forecast_length=10,
         #                       stack_types=(NBeatsNet.TREND_BLOCK, NBeatsNet.SEASONALITY_BLOCK), nb_blocks_per_stack=3,
@@ -344,10 +451,13 @@ def main():
             raise ValueError('Unknown task.')
 
     # model.compile_model(loss='mae', learning_rate=1e-5)
-        model.compile_model(loss='mse', learning_rate=1e-4)
-    # train_model(model, args.task, is_test=args.test)
-    fit_model(model, args.task, is_test=args.test)
+        model.compile_model(loss='mse', learning_rate=2e-5)
 
+    if not args.test:
+        # train_model(model, args.task, is_test=args.test)
+        fit_model(model, args.task, is_test=args.test)
+    else:
+        predict_model(model, 'm5')
 
 if __name__ == '__main__':
     main()
